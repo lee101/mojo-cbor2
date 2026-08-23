@@ -368,7 +368,7 @@ def test_simd_payload_copy_tail(length):
 
 
 @pytest.mark.parametrize(
-    "length", [(1 << 20) - 1, 1 << 20, (1 << 20) + 17]
+    "length", [(4 << 20) - 1, 4 << 20, (4 << 20) + 17]
 )
 def test_parallel_payload_copy_threshold(length):
     value = bytes(range(251)) * (length // 251) + bytes(range(length % 251))
@@ -387,6 +387,36 @@ def test_unsigned_array_fast_path_falls_back_for_other_scalar_types():
     decoded = cbor2.loads(cbor2.dumps(value))
     assert decoded == value
     assert decoded[-1] is True
+
+
+@pytest.mark.parametrize("length", [255, 256, 257])
+def test_flat_map_array_fast_path_threshold_and_fallback(monkeypatch, length):
+    values = [
+        {
+            "id": index,
+            "active": index % 3 == 0,
+            "name": f"record-{index}",
+            b"raw": bytes((index & 0xFF,)),
+            7: None,
+        }
+        for index in range(length)
+    ]
+    encoded = cbor2.dumps(values)
+
+    monkeypatch.setattr(cbor2, "_encode_flat_map_array", lambda obj, options: None)
+    assert encoded == cbor2.dumps(values)
+
+    decoded = cbor2.loads(encoded)
+    monkeypatch.setattr(cbor2, "_decode_flat_map_array", lambda *args, **kwargs: None)
+    assert decoded == cbor2.loads(encoded) == values
+
+
+def test_flat_map_array_fast_path_rejects_nested_values_safely(monkeypatch):
+    values = [{"id": index, "nested": [index, index + 1]} for index in range(256)]
+    encoded = cbor2.dumps(values)
+    monkeypatch.setattr(cbor2, "_encode_flat_map_array", lambda obj, options: None)
+    assert encoded == cbor2.dumps(values)
+    assert cbor2.loads(encoded) == values
 
 
 def test_numpy_payload_stays_zero_copy_at_ffi_boundary(monkeypatch):

@@ -76,8 +76,10 @@ Small generated payloads are combined into one pinned buffer, while existing
 bytes and writable NumPy-backed memoryviews remain zero-copy. One C-ABI call
 passes the tape and a Python-owned output buffer to Mojo, which emits the
 complete document. Large homogeneous unsigned-integer arrays use a compact
-native path without constructing the general instruction tape. No
-allocator-owned memory crosses the FFI boundary.
+native path without constructing the general instruction tape. Large arrays of
+flat primitive maps use guarded iterative tape construction, with the recursive
+builder retained as the fallback. No allocator-owned memory crosses the FFI
+boundary.
 
 Decoding passes the input address as an integer to Mojo. The native scanner
 checks initial bytes and bounds, decodes big-endian arguments, skips payloads,
@@ -97,19 +99,23 @@ Machine: `x86_64`; `Linux 6.8.0-136-generic`, glibc 2.39.
 
 | workload | mojo-cbor2 | cbor2 | relative |
 |---|---:|---:|---:|
-| encode 200k integers | 15.56 ms | 57.88 ms | 3.72x |
-| decode 200k integers | 4.65 ms | 15.85 ms | 3.41x |
-| encode 30k records | 305.60 ms | 66.29 ms | 0.22x |
-| decode 30k records | 253.01 ms | 49.00 ms | 0.19x |
-| encode 16 MiB bytes | 0.72 ms | 15.18 ms | 21.12x |
-| decode 16 MiB bytes | 1.58 ms | 26.47 ms | 16.76x |
+| encode 200k integers | 11.55 ms | 57.49 ms | 4.98x |
+| decode 200k integers | 3.56 ms | 9.59 ms | 2.69x |
+| encode 30k records | 75.28 ms | 39.16 ms | 0.52x |
+| decode 30k records | 94.49 ms | 29.59 ms | 0.31x |
+| encode 16 MiB bytes | 1.16 ms | 6.94 ms | 6.00x |
+| decode 16 MiB bytes | 1.31 ms | 16.87 ms | 12.85x |
 
-Upstream's mature C extension is substantially faster for object-dense
-documents because Python still constructs and consumes this port's tape.
-Homogeneous integer arrays bypass that overhead, and large payload copies use
-SIMD with a scalar tail plus thresholded CPU parallelism.
+Upstream's mature C extension remains faster for object-dense documents because
+Python still constructs and consumes this port's tape. Flat primitive map arrays
+bypass recursive Python dispatch, homogeneous integer arrays use their compact
+native path, and payload copies use SIMD with a scalar tail. Exact byte strings
+of at least 4 MiB are divided among four concurrent calls to the native SIMD
+copy kernel; smaller inputs remain serial to avoid launch overhead.
 
-No GPU path is included; this benchmark exercises the CPU implementation only.
+No GPU path is included. CBOR header scanning is branch-heavy and payload copying
+performs essentially no arithmetic per byte, far below the roughly two FLOPs per
+byte threshold where device transfer and launch costs could be justified.
 
 ## License
 

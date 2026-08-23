@@ -5,6 +5,7 @@ import ctypes
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
 LIB = os.path.join(ROOT, "dist", "libmojo-cbor2.so")
@@ -13,7 +14,7 @@ I = ctypes.c_int64
 _U64_ITEMSIZE = ctypes.sizeof(ctypes.c_uint64)
 
 _instance: ctypes.CDLL | None = None
-_parallel_ready = False
+_copy_pool: ThreadPoolExecutor | None = None
 _pybytes_ptr = ctypes.pythonapi.PyBytes_AsString
 _pybytes_ptr.argtypes = [ctypes.py_object]
 _pybytes_ptr.restype = ctypes.c_void_p
@@ -34,6 +35,8 @@ def lib() -> ctypes.CDLL:
         _instance = ctypes.CDLL(LIB)
         _instance.mcbor_encode.argtypes = [I, I, I, I, I]
         _instance.mcbor_encode.restype = I
+        _instance.mcbor_copy_bytes.argtypes = [I, I, I]
+        _instance.mcbor_copy_bytes.restype = I
         _instance.mcbor_uint_array_size.argtypes = [I, I]
         _instance.mcbor_uint_array_size.restype = I
         _instance.mcbor_encode_uint_array.argtypes = [I, I, I, I]
@@ -76,20 +79,6 @@ def tape_addr(value: array.array[int]) -> int:
     return ctypes.addressof((ctypes.c_uint64 * len(value)).from_buffer(value))
 
 
-def _ensure_parallel_runtime():
-    global _parallel_ready
-    if not _parallel_ready:
-        runtime = ctypes.CDLL(
-            os.path.join(sys.prefix, "lib", "libKGENCompilerRTShared.so")
-        )
-        initialize = runtime.KGEN_CompilerRT_AsyncRT_GetOrCreateCPUDevice
-        initialize.argtypes = []
-        initialize.restype = ctypes.c_void_p
-        if not initialize():
-            raise RuntimeError("failed to initialize the Mojo CPU runtime")
-        _parallel_ready = True
-
-
 def _output_buffer(size: int) -> tuple[bytes, int]:
     if size < 0 or size > sys.maxsize:
         raise OverflowError("native output size is out of range")
@@ -104,8 +93,6 @@ def encode(
         raise ValueError("native encoder tape must contain four-word records")
     if not tape:
         raise ValueError("native encoder tape cannot be empty")
-    if output_size >= 1 << 20:
-        _ensure_parallel_runtime()
     target, target_addr = _output_buffer(output_size)
     written = lib().mcbor_encode(
         tape_addr(tape),
@@ -118,6 +105,32 @@ def encode(
         raise RuntimeError(f"native CBOR encoder failed with status {written}")
     if written != output_size:
         raise RuntimeError("native CBOR encoder returned an inconsistent size")
+    return target
+
+
+def encode_bytes_parallel(value: bytes, header: bytes) -> bytes:
+    global _copy_pool
+    target, target_addr = _output_buffer(len(header) + len(value))
+    ctypes.memmove(target_addr, header, len(header))
+    source_addr = bytes_addr(value)
+    if _copy_pool is None:
+        _copy_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcbor-copy")
+    chunk = (len(value) + 3) // 4
+    copy = lib().mcbor_copy_bytes
+    futures = []
+    for start in range(0, len(value), chunk):
+        count = min(chunk, len(value) - start)
+        futures.append(
+            _copy_pool.submit(
+                copy,
+                source_addr + start,
+                target_addr + len(header) + start,
+                count,
+            )
+        )
+    statuses = [future.result() for future in futures]
+    if any(status < 0 for status in statuses):
+        raise RuntimeError("parallel native byte copy failed")
     return target
 
 

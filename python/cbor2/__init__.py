@@ -136,6 +136,18 @@ def _head_size(value: int) -> int:
     return 9
 
 
+def _bytes_head(length: int) -> bytes:
+    if length < 24:
+        return bytes((0x40 | length,))
+    if length <= 0xFF:
+        return bytes((0x58, length))
+    if length <= 0xFFFF:
+        return b"\x59" + length.to_bytes(2, "big")
+    if length <= 0xFFFFFFFF:
+        return b"\x5a" + length.to_bytes(4, "big")
+    return b"\x5b" + length.to_bytes(8, "big")
+
+
 def _float_bytes(value: float, canonical: bool) -> bytes:
     if math.isnan(value):
         return b"\xf9\x7e\x00"
@@ -462,6 +474,8 @@ class _Builder:
 
 
 def _encode(obj, options) -> bytes:
+    if type(obj) is bytes and len(obj) >= 4 << 20:
+        return _lib.encode_bytes_parallel(obj, _bytes_head(len(obj)))
     if (
         isinstance(obj, (list, tuple))
         and len(obj) >= 64
@@ -474,11 +488,128 @@ def _encode(obj, options) -> bytes:
             pass
         else:
             return _lib.encode_uint_array(values)
+    flat_maps = _encode_flat_map_array(obj, options)
+    if flat_maps is not None:
+        return flat_maps
     builder = _Builder(**options)
     builder.visit(obj)
     tape = array.array("Q", builder.tape)
     payloads = b"".join(builder.payloads)
     return _lib.encode(tape, builder.size, payloads)
+
+
+def _encode_flat_map_array(obj, options) -> bytes | None:
+    if (
+        type(obj) not in (list, tuple)
+        or len(obj) < 256
+        or options["indefinite_containers"]
+        or options["canonical"]
+        or options["encoders"]
+        or options["default"] is not None
+    ):
+        return None
+
+    tape = [4, len(obj), 0, 0]
+    payloads = []
+    payload_size = 0
+    size = _head_size(len(obj))
+    key_cache = {}
+    extend = tape.extend
+    append_payload = payloads.append
+    head_size = _head_size
+
+    for item in obj:
+        if type(item) is not dict:
+            return None
+        extend((5, len(item), 0, 0))
+        size += head_size(len(item))
+        for key, value in item.items():
+            key_type = type(key)
+            if key_type is str:
+                encoded = key_cache.get(key)
+                if encoded is None:
+                    encoded = key.encode("utf-8")
+                    key_cache[key] = encoded
+                length = len(encoded)
+                extend((19, length, payload_size, length))
+                append_payload(encoded)
+                payload_size += length
+                size += head_size(length) + length
+            elif key_type is int:
+                if 0 <= key <= _MAX_U64:
+                    extend((0, key, 0, 0))
+                    size += head_size(key)
+                elif -1 - _MAX_U64 <= key < 0:
+                    arg = -1 - key
+                    extend((1, arg, 0, 0))
+                    size += head_size(arg)
+                else:
+                    return None
+            elif key is False:
+                extend((7, 20, 0, 0))
+                size += 1
+            elif key is True:
+                extend((7, 21, 0, 0))
+                size += 1
+            elif key is None:
+                extend((7, 22, 0, 0))
+                size += 1
+            elif key_type is bytes:
+                length = len(key)
+                extend((18, length, payload_size, length))
+                append_payload(key)
+                payload_size += length
+                size += head_size(length) + length
+            else:
+                return None
+
+            value_type = type(value)
+            if value_type is str:
+                encoded = value.encode("utf-8")
+                length = len(encoded)
+                extend((19, length, payload_size, length))
+                append_payload(encoded)
+                payload_size += length
+                size += head_size(length) + length
+            elif value_type is int:
+                if 0 <= value <= _MAX_U64:
+                    extend((0, value, 0, 0))
+                    size += head_size(value)
+                elif -1 - _MAX_U64 <= value < 0:
+                    arg = -1 - value
+                    extend((1, arg, 0, 0))
+                    size += head_size(arg)
+                else:
+                    return None
+            elif value is False:
+                extend((7, 20, 0, 0))
+                size += 1
+            elif value is True:
+                extend((7, 21, 0, 0))
+                size += 1
+            elif value is None:
+                extend((7, 22, 0, 0))
+                size += 1
+            elif value is undefined:
+                extend((7, 23, 0, 0))
+                size += 1
+            elif value_type is bytes:
+                length = len(value)
+                extend((18, length, payload_size, length))
+                append_payload(value)
+                payload_size += length
+                size += head_size(length) + length
+            elif value_type is float:
+                encoded = _float_bytes(value, False)
+                length = len(encoded)
+                extend((24, 0, payload_size, length))
+                append_payload(encoded)
+                payload_size += length
+                size += length
+            else:
+                return None
+
+    return _lib.encode(array.array("Q", tape), size, b"".join(payloads))
 
 
 def dumps(
@@ -745,6 +876,19 @@ def _loads_one(
         raise CBORDecodeEOF("premature end of stream") from exc
     except ValueError as exc:
         raise CBORDecodeError(str(exc)) from exc
+    flat_maps = _decode_flat_map_array(
+        raw,
+        tape,
+        tag_hook=tag_hook,
+        object_hook=object_hook,
+        semantic_decoders=semantic_decoders,
+        str_errors=str_errors,
+        max_depth=max_depth,
+        allow_duplicate_keys=allow_duplicate_keys,
+        immutable=immutable,
+    )
+    if flat_maps is not None:
+        return flat_maps
     parser = _Parser(
         raw,
         tape,
@@ -761,6 +905,130 @@ def _loads_one(
         tape[parser.index * 4 + 2] if parser.index < parser.count else len(raw)
     )
     return value, consumed
+
+
+def _decode_flat_map_array(
+    data,
+    tape,
+    *,
+    tag_hook,
+    object_hook,
+    semantic_decoders,
+    str_errors,
+    max_depth,
+    allow_duplicate_keys,
+    immutable,
+):
+    if (
+        len(tape) < 4
+        or tape[0] != 4
+        or tape[1] < 256
+        or tape[1] == _INDEFINITE
+        or tag_hook is not None
+        or object_hook is not None
+        or semantic_decoders
+        or immutable
+        or max_depth < 2
+    ):
+        return None
+
+    count = tape[1]
+    token_count = len(tape) // 4
+    index = 1
+    result = []
+    append_result = result.append
+    text_cache = {}
+    cache_get = text_cache.get
+    data_is_bytes = isinstance(data, bytes)
+
+    for _ in range(count):
+        if index >= token_count:
+            return None
+        base = index * 4
+        if tape[base] != 5 or tape[base + 1] == _INDEFINITE:
+            return None
+        pair_count = tape[base + 1]
+        index += 1
+        item = {}
+        for _ in range(pair_count):
+            if index + 1 >= token_count:
+                return None
+            base = index * 4
+            index += 1
+            kind = tape[base]
+            arg = tape[base + 1]
+            if kind == 0:
+                key = arg
+            elif kind == 1:
+                key = -1 - arg
+            elif kind == 2 or kind == 3:
+                offset = tape[base + 3]
+                raw = data[offset : offset + arg]
+                if not data_is_bytes:
+                    raw = raw.tobytes()
+                if kind == 2:
+                    key = raw
+                else:
+                    key = cache_get(raw)
+                    if key is None:
+                        key = raw.decode("utf-8", str_errors)
+                        if len(text_cache) < 256:
+                            text_cache[raw] = key
+            elif kind == 7:
+                if arg == 20:
+                    key = False
+                elif arg == 21:
+                    key = True
+                elif arg == 22:
+                    key = None
+                elif arg == 23:
+                    key = undefined
+                else:
+                    key = CBORSimpleValue(arg)
+            else:
+                return None
+
+            if not allow_duplicate_keys and key in item:
+                raise CBORDecodeError(f"duplicate map key {key!r}")
+
+            base = index * 4
+            index += 1
+            kind = tape[base]
+            arg = tape[base + 1]
+            if kind == 0:
+                value = arg
+            elif kind == 1:
+                value = -1 - arg
+            elif kind == 2 or kind == 3:
+                offset = tape[base + 3]
+                raw = data[offset : offset + arg]
+                if not data_is_bytes:
+                    raw = raw.tobytes()
+                value = raw if kind == 2 else raw.decode("utf-8", str_errors)
+            elif kind == 7:
+                if arg == 20:
+                    value = False
+                elif arg == 21:
+                    value = True
+                elif arg == 22:
+                    value = None
+                elif arg == 23:
+                    value = undefined
+                else:
+                    value = CBORSimpleValue(arg)
+            elif kind == 8:
+                value = struct.unpack(">e", arg.to_bytes(2, "big"))[0]
+            elif kind == 9:
+                value = struct.unpack(">f", arg.to_bytes(4, "big"))[0]
+            elif kind == 10:
+                value = struct.unpack(">d", arg.to_bytes(8, "big"))[0]
+            else:
+                return None
+            item[key] = value
+        append_result(item)
+
+    consumed = tape[index * 4 + 2] if index < token_count else len(data)
+    return result, consumed
 
 
 def _definite_array_info(

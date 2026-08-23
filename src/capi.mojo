@@ -62,6 +62,16 @@ def copy_bytes(src: BPtr, dst: BPtr, n: Int):
         i += 1
 
 
+@export("mcbor_copy_bytes")
+def mcbor_copy_bytes(src_addr: Int, dst_addr: Int, size: Int) abi("C") -> Int:
+    if size < 0 or src_addr == 0 or dst_addr == 0:
+        return -3
+    var src = BPtr(unsafe_from_address=src_addr)
+    var dst = BPtr(unsafe_from_address=dst_addr)
+    copy_bytes(src, dst, size)
+    return size
+
+
 @export("mcbor_encode")
 def mcbor_encode(
     tape_addr: Int,
