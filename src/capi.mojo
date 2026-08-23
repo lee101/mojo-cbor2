@@ -1,11 +1,9 @@
 """CBOR wire encoder and scanner exposed through a small C ABI."""
 
-from std.algorithm import parallelize
 from std.sys import simd_width_of
 
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime U64Ptr = UnsafePointer[UInt64, AnyOrigin[mut=True]]
-comptime PARALLEL_COPY_THRESHOLD = 1 << 20
 
 
 def write_head(dst: BPtr, pos: Int, major: Int, arg: UInt64) -> Int:
@@ -49,32 +47,6 @@ def head_size(arg: UInt64) -> Int:
 
 def copy_bytes(src: BPtr, dst: BPtr, n: Int):
     comptime W = simd_width_of[DType.float64]()
-    if n >= PARALLEL_COPY_THRESHOLD:
-        var num_tasks = (
-            n + PARALLEL_COPY_THRESHOLD - 1
-        ) // PARALLEL_COPY_THRESHOLD
-
-        @parameter
-        def copy_task(task: Int):
-            var start = task * PARALLEL_COPY_THRESHOLD
-            var stop = min(start + PARALLEL_COPY_THRESHOLD, n)
-            var i = start
-            while i + 4 * W <= stop:
-                dst.store(i, src.load[width=W](i))
-                dst.store(i + W, src.load[width=W](i + W))
-                dst.store(i + 2 * W, src.load[width=W](i + 2 * W))
-                dst.store(i + 3 * W, src.load[width=W](i + 3 * W))
-                i += 4 * W
-            while i + W <= stop:
-                dst.store(i, src.load[width=W](i))
-                i += W
-            while i < stop:
-                dst[i] = src[i]
-                i += 1
-
-        parallelize[copy_task](num_tasks)
-        return
-
     var i = 0
     while i + 4 * W <= n:
         dst.store(i, src.load[width=W](i))
