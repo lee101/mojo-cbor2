@@ -5,6 +5,9 @@ from std.sys import simd_width_of
 comptime BPtr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
 comptime U64Ptr = UnsafePointer[UInt64, AnyOrigin[mut=True]]
 
+# Group width for the compile-time-unrolled loops (`comptime for`).
+comptime UNROLL = 8
+
 
 def write_head(dst: BPtr, pos: Int, major: Int, arg: UInt64) -> Int:
     var p = pos
@@ -183,11 +186,22 @@ def mcbor_encode_uint_array(
     if array_head_size > capacity:
         return -1
     var pos = write_head(dst, 0, 4, UInt64(count))
-    for i in range(count):
-        var needed = head_size(values[i])
-        if pos + needed > capacity:
+    var i = 0
+    # The group is entered only when the sum of its exact head sizes fits, which
+    # is exactly when the element-at-a-time loop below would have accepted every
+    # member, so -1 is still reported from the same input.
+    while i + UNROLL <= count:
+        var group = 0
+        comptime for k in range(UNROLL):
+            group += head_size(values[i + k])
+        if pos + group > capacity:
             return -1
+        comptime for k in range(UNROLL):
+            pos = write_head(dst, pos, 0, values[i + k])
+        i += UNROLL
+    while i < count:
         pos = write_head(dst, pos, 0, values[i])
+        i += 1
     return pos
 
 
