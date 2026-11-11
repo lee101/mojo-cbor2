@@ -49,17 +49,29 @@ def head_size(arg: UInt64) -> Int:
 
 
 def copy_bytes(src: BPtr, dst: BPtr, n: Int):
-    comptime W = simd_width_of[DType.float64]()
+    """Byte copy: 16-byte vectors, 256 bytes per step, then scalar tail.
+
+    Neither buffer is required to be 16-byte aligned: payloads land at
+    arbitrary output offsets, and 16-byte unaligned loads/stores are valid on
+    x86-64. Length, not alignment, decides the path.
+
+    The step is a literal rather than `simd_width_of[DType.uint8]()`, because
+    that builtin reports a vector's lane count, not its byte width; a step
+    derived from it would silently change size on targets with other widths.
+    """
+    comptime VEC = 16
+    comptime PER = 16
     var i = 0
-    while i + 4 * W <= n:
-        dst.store(i, src.unsafe_load[width=W](i))
-        dst.store(i + W, src.unsafe_load[width=W](i + W))
-        dst.store(i + 2 * W, src.unsafe_load[width=W](i + 2 * W))
-        dst.store(i + 3 * W, src.unsafe_load[width=W](i + 3 * W))
-        i += 4 * W
-    while i + W <= n:
-        dst.store(i, src.unsafe_load[width=W](i))
-        i += W
+    while i + PER * VEC <= n:
+        var s = src + i
+        var d = dst + i
+        comptime for k in range(PER):
+            var off = k * VEC
+            (d + off).unsafe_store[width=VEC]((s + off).unsafe_load[width=VEC](0))
+        i += PER * VEC
+    while i + VEC <= n:
+        (dst + i).unsafe_store[width=VEC]((src + i).unsafe_load[width=VEC](0))
+        i += VEC
     while i < n:
         dst[i] = src[i]
         i += 1

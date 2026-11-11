@@ -367,6 +367,55 @@ def test_simd_payload_copy_tail(length):
     assert cbor2.loads(cbor2.dumps(value)) == value
 
 
+def _writable_at(buffer, offset):
+    """ctypes address of `buffer` plus `offset` bytes (arbitrary alignment)."""
+    import ctypes
+
+    base = ctypes.addressof((ctypes.c_uint8 * len(buffer)).from_buffer(buffer))
+    return base + offset
+
+
+@pytest.mark.parametrize(
+    "length", [0, 1, 15, 16, 17, 255, 256, 257, 4095, 4096, 4097, 70001]
+)
+@pytest.mark.parametrize("offset", [0, 1, 3, 8])
+def test_simd_copy_block_and_tail_boundaries(length, offset):
+    """copy_bytes must handle every length and any destination alignment.
+
+    The kernel moves 256 bytes per step in 16-byte vectors and then finishes
+    with a scalar tail, so lengths around 16 and 256, and destinations that are
+    not vector-aligned, are where mistakes show up.
+    """
+    from cbor2 import _lib
+
+    source = bytes((index * 37 + 11) & 0xFF for index in range(length + 1))
+    target = bytearray(length + 64)
+    address = _writable_at(target, offset)
+    assert _lib.lib().mcbor_copy_bytes(
+        _lib.bytes_addr(source), address, length
+    ) == length
+    assert bytes(target[offset : offset + length]) == source[:length]
+    assert bytes(target[:offset]) == bytes(offset)
+    assert bytes(target[offset + length :]) == bytes(64 - offset)
+
+
+@pytest.mark.parametrize(
+    "length", [255, 256, 257, 511, 512, 513, 1000, 4095, 4096, 4097]
+)
+@pytest.mark.parametrize("depth", [1, 2, 3])
+def test_payload_copy_block_boundaries_through_encoder(length, depth):
+    """End-to-end payloads at 256-byte block boundaries and odd offsets.
+
+    Each level of nesting shifts the destination offset, so these payloads are
+    written to addresses the SIMD copy sees as unaligned.
+    """
+    payload = bytes((index * 13 + 5) & 0xFF for index in range(length))
+    value = payload
+    for _ in range(depth):
+        value = [b"pad", value, 1]
+    assert cbor2.loads(cbor2.dumps(value)) == value
+
+
 @pytest.mark.parametrize(
     "length", [(4 << 20) - 1, 4 << 20, (4 << 20) + 17]
 )
