@@ -474,7 +474,7 @@ class _Builder:
 
 
 def _encode(obj, options) -> bytes:
-    if type(obj) is bytes and len(obj) >= 4 << 20:
+    if type(obj) is bytes and len(obj) >= _lib._THREADED_COPY_THRESHOLD:
         return _lib.encode_bytes_parallel(obj, _bytes_head(len(obj)))
     if (
         isinstance(obj, (list, tuple))

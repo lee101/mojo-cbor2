@@ -417,11 +417,57 @@ def test_payload_copy_block_boundaries_through_encoder(length, depth):
 
 
 @pytest.mark.parametrize(
-    "length", [(4 << 20) - 1, 4 << 20, (4 << 20) + 17]
+    "length",
+    [
+        8 << 20,
+        (8 << 20) + 17,
+        # Chunk-boundary stress around the 4-worker split: 8 MiB / 4 = 2 MiB
+        # exactly, so +-1 byte makes the last chunk 1 byte short (and 3 for the
+        # +17 case), exercising the serial kernel's vector/tail ladder.
+        (8 << 20) - 1,
+        (8 << 20) + 1,
+    ],
 )
 def test_parallel_payload_copy_threshold(length):
     value = bytes(range(251)) * (length // 251) + bytes(range(length % 251))
     assert cbor2.loads(cbor2.dumps(value)) == value
+
+
+@pytest.mark.parametrize(
+    "length", [4 << 20, (4 << 20) + 17, 8 << 20, (8 << 20) + 1, 9 << 20]
+)
+def test_serial_and_threaded_copy_agree(monkeypatch, length):
+    """The threaded copy path and the serial kernel must emit identical bytes.
+
+    `MCBOR_SERIAL` forces the serial kernel inside `_lib.encode_bytes_parallel`,
+    so both calls run the same code apart from the fan-out itself.
+    """
+    value = bytes((index * 7 + 3) & 0xFF for index in range(length))
+    threaded = cbor2.dumps(value)
+    monkeypatch.setenv("MCBOR_SERIAL", "1")
+    serial = cbor2.dumps(value)
+    assert threaded == serial
+    assert cbor2.loads(threaded) == value
+
+
+def test_bytes_fast_path_engages_only_at_threshold(monkeypatch):
+    """Below the threshold `_encode` must not call the threaded path at all;
+    above it, it must call it exactly once. The spy passes through, so the
+    encode result is still exercised."""
+    import cbor2._lib as _lib
+
+    calls = []
+    original = _lib.encode_bytes_parallel
+
+    def spy(value, header):
+        calls.append(len(value))
+        return original(value, header)
+
+    monkeypatch.setattr(_lib, "encode_bytes_parallel", spy)
+    assert cbor2.dumps(bytes((8 << 20) - 1)) is not None
+    assert calls == []
+    assert cbor2.dumps(bytes(8 << 20)) is not None
+    assert calls == [8 << 20]
 
 
 @pytest.mark.parametrize("length", [63, 64, 65])

@@ -22,6 +22,18 @@ _pybytes_new = ctypes.pythonapi.PyBytes_FromStringAndSize
 _pybytes_new.argtypes = [ctypes.c_void_p, ctypes.c_ssize_t]
 _pybytes_new.restype = ctypes.py_object
 
+# Payloads at or above this size are copied by four host threads; below it the
+# serial kernel wins. Measured crossover is ~6-7 MiB; 8 MiB keeps a margin
+# (1.7x at 8 MiB, 1.00x at 4 MiB). See README, "Parallel phase".
+_THREADED_COPY_THRESHOLD = 8 << 20
+_COPY_WORKERS = 4
+
+
+def _serial_only() -> bool:
+    """Force the serial copy path; used by the serial-vs-threads benchmark."""
+    return bool(os.environ.get("MCBOR_SERIAL"))
+
+
 
 def lib() -> ctypes.CDLL:
     global _instance
@@ -109,13 +121,21 @@ def encode(
 
 
 def encode_bytes_parallel(value: bytes, header: bytes) -> bytes:
-    global _copy_pool
+    """Copy a large bytes payload into the output with up to 4 threads."""
     target, target_addr = _output_buffer(len(header) + len(value))
     ctypes.memmove(target_addr, header, len(header))
+    if _serial_only() or len(value) < _THREADED_COPY_THRESHOLD:
+        written = lib().mcbor_copy_bytes(
+            bytes_addr(value), target_addr + len(header), len(value)
+        )
+        if written < 0:
+            raise RuntimeError("native byte copy failed")
+        return target
+    global _copy_pool
     source_addr = bytes_addr(value)
     if _copy_pool is None:
-        _copy_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mcbor-copy")
-    chunk = (len(value) + 3) // 4
+        _copy_pool = ThreadPoolExecutor(max_workers=_COPY_WORKERS, thread_name_prefix="mcbor-copy")
+    chunk = (len(value) + _COPY_WORKERS - 1) // _COPY_WORKERS
     copy = lib().mcbor_copy_bytes
     futures = []
     for start in range(0, len(value), chunk):
