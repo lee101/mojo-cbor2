@@ -49,13 +49,13 @@ def copy_bytes(src: BPtr, dst: BPtr, n: Int):
     comptime W = simd_width_of[DType.float64]()
     var i = 0
     while i + 4 * W <= n:
-        dst.store(i, src.load[width=W](i))
-        dst.store(i + W, src.load[width=W](i + W))
-        dst.store(i + 2 * W, src.load[width=W](i + 2 * W))
-        dst.store(i + 3 * W, src.load[width=W](i + 3 * W))
+        dst.store(i, src.unsafe_load[width=W](i))
+        dst.store(i + W, src.unsafe_load[width=W](i + W))
+        dst.store(i + 2 * W, src.unsafe_load[width=W](i + 2 * W))
+        dst.store(i + 3 * W, src.unsafe_load[width=W](i + 3 * W))
         i += 4 * W
     while i + W <= n:
-        dst.store(i, src.load[width=W](i))
+        dst.store(i, src.unsafe_load[width=W](i))
         i += W
     while i < n:
         dst[i] = src[i]
