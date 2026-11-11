@@ -127,9 +127,28 @@ of at least 8 MiB are divided among four host threads that each call the native
 SIMD copy kernel; smaller inputs stay serial, because the fan-out only pays off
 above that size (see the parallel phase below).
 
-No GPU path is included. CBOR header scanning is branch-heavy and payload copying
-performs essentially no arithmetic per byte, far below the roughly two FLOPs per
-byte threshold where device transfer and launch costs could be justified.
+CPU only: memory-bound.
+
+No GPU path is included, and this is a deliberate gate decision rather than an
+untested one. The whole native core is one kernel, `copy_bytes` in
+`src/capi.mojo`, and it does zero arithmetic per byte: 0 FLOPs/byte against the
+~2 FLOPs/byte floor where device transfer plus a launch can pay off.
+`bench/analysis.md` section 2 records the rest of the candidate list: the integer
+encoder/decoder loops and `mcbor_scan` are byte-at-a-time dependent control flow (a
+data-dependent branch per element, not vectorisable arithmetic), and the tape
+fusion and per-lane head-width SIMD attempts were measured and reverted. Nothing
+here clears 2 FLOPs/byte, so there was no kernel to move and no transfer budget to
+spend.
+
+For the record, the shared device at the time of this decision reported 6292 MiB
+free via `nvidia-smi --query-gpu=memory.free --format=csv,noheader` (above the
+4000 MiB floor), so memory pressure was not the reason to stop. The FLOP gate was.
+The evidence that the payload copy is bandwidth-bound agrees: section 3 of
+`bench/analysis.md` shows 16 MiB copies at 1.0-1.26x, flat rather than rising with
+worker count. A device copy of the same bytes would pay two PCIe transfers and a
+launch to run the same memcpy. Tests therefore contain no GPU-only cases, so
+nothing is skipped on a CPU-only host and nothing here should be read as "GPU path
+written but untested": no GPU code exists in this library.
 
 ### SIMD pass: native copy kernel
 
